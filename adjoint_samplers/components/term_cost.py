@@ -130,7 +130,7 @@ class GraphSteinCVCorrectorGradTermCost(CorrectorGradTermCost):
         )
         TF = graph_utils.remove_mean(TF, self.n_particles, self.n_spatial_dim)
         lam = fit_lambda(raw.detach(), TF.detach())
-        return raw - lam * TF
+        return raw - lam * TF.detach()
 
     def grad_E(self, x1):
         N, D = self.n_particles, self.n_spatial_dim
