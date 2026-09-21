@@ -1,0 +1,23 @@
+#!/bin/bash
+#PBS -N dw4_asbs
+#PBS -P YOUR_PROJECT_CODE
+#PBS -q gpu_as
+#PBS -l walltime=4:00:00
+#PBS -l select=1:ncpus=4:ngpus=1
+#PBS -j oe
+
+cd "$PBS_O_WORKDIR"
+
+module load anaconda/2025
+# module load cuda/13.0   # if needed on your env
+eval "$(/usr/local/anaconda2025/bin/conda shell.bash hook)"
+conda activate adjoint_samplers
+
+# PBS -v SEED=0  (passed at qsub time)
+: "${SEED:?SEED must be set, e.g. qsub -v SEED=0 dw4_asbs.pbs}"
+
+python train.py \
+  experiment=dw4_asbs \
+  seed=${SEED} \
+  exp_name=dw4_asbs_seed${SEED} \
+  hydra.run.dir=results/dw4_asbs/seed${SEED}
