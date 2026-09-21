@@ -12,7 +12,7 @@ import torch
 import torch.backends.cudnn as cudnn
 
 from adjoint_samplers.components.sde import ControlledSDE, sdeint
-from adjoint_samplers.train_loop import train_one_epoch
+from adjoint_samplers.train_loop import train_one_epoch, train_one_epoch_stein
 import adjoint_samplers.utils.train_utils as train_utils
 import adjoint_samplers.utils.distributed_mode as distributed_mode
 
@@ -63,14 +63,18 @@ def main(cfg):
         else:
             corrector = corrector_matcher = None
 
+        f_phi = None
+        if "stein_cv" in cfg:
+            print("Instantiating Stein CV...")
+            f_phi = hydra.utils.instantiate(cfg.stein_cv).to(device)
 
-        print("Instantiating grad of costs...")
         grad_term_cost = hydra.utils.instantiate(
             cfg.term_cost,
             corrector=corrector,
             energy=energy,
             ref_sde=ref_sde,
             source=source,
+            **({"stein_cv": f_phi} if f_phi is not None else {}),
         )
 
 
@@ -94,6 +98,10 @@ def main(cfg):
                 controller.parameters(), **cfg.adjoint_matcher.optim,
             )
 
+        stein_opt = (
+            torch.optim.Adam(f_phi.parameters(), lr=1e-4)
+            if f_phi is not None else None
+        )
 
         checkpoint_path = Path(cfg.checkpoint or "checkpoints/checkpoint_latest.pt")
         checkpoint_path.parent.mkdir(exist_ok=True)
@@ -146,16 +154,17 @@ def main(cfg):
                 "corrector": (corrector_matcher, corrector),
             }.get(stage)
 
-            loss = train_one_epoch(
-                matcher,
-                model,
-                source,
-                optimizer,
-                lr_schedule,
-                epoch,
-                device,
-                cfg
-            )
+            if f_phi is not None:
+                loss = train_one_epoch_stein(
+                    matcher, model, source, optimizer, lr_schedule,
+                    epoch, device, cfg,
+                    f_phi=f_phi, stein_opt=stein_opt, energy=energy,
+                )
+            else:
+                loss = train_one_epoch(
+                    matcher, model, source, optimizer, lr_schedule,
+                    epoch, device, cfg,
+                )
 
             writer.log({
                 f"{stage}_loss": loss,

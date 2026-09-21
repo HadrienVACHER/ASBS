@@ -2,7 +2,7 @@
 
 import torch
 import adjoint_samplers.utils.graph_utils as graph_utils
-
+from adjoint_samplers.components.stein_cv import stein_vector_diag, fit_lambda
 
 class GradEnergy:
     """ Compute ∇E(X_1)
@@ -112,3 +112,28 @@ class GraphScoreGradTermCost(ScoreGradTermCost):
 
         grad_E = graph_utils.remove_mean(grad_E, N, D)
         return grad_E
+
+# For ASBS with Stein CV on n-particle systems.
+class GraphSteinCVCorrectorGradTermCost(CorrectorGradTermCost):
+    def __init__(self, corrector, energy, stein_cv=None, **kwargs):
+        super().__init__(corrector, energy, **kwargs)
+        self.n_particles = energy.n_particles
+        self.n_spatial_dim = energy.n_spatial_dim
+        self.stein_cv = stein_cv  # None = current ASBS
+
+    def cv_force(self, x1):
+        raw = self.energy(x1)["forces"]
+        if self.stein_cv is None:
+            return raw
+        TF, _, _ = stein_vector_diag(
+            self.stein_cv, self.energy, x1, create_graph=False
+        )
+        TF = graph_utils.remove_mean(TF, self.n_particles, self.n_spatial_dim)
+        lam = fit_lambda(raw.detach(), TF.detach())
+        return raw - lam * TF
+
+    def grad_E(self, x1):
+        N, D = self.n_particles, self.n_spatial_dim
+        grad_E = self.cv_force(x1)
+        grad_E = self.clip(grad_E.view(-1, N, D)).view(-1, N * D)
+        return graph_utils.remove_mean(grad_E, N, D)

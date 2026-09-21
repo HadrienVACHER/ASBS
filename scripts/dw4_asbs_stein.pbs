@@ -15,7 +15,7 @@ conda activate BMS
 : "${SEED:?SEED must be set, e.g. qsub -v SEED=0 dw4_asbs.pbs}"
 
 python train.py \
-  experiment=dw4_asbs \
+  experiment=dw4_asbs_stein \
   seed=${SEED} \
-  exp_name=dw4_asbs_seed${SEED} \
-  hydra.run.dir=results/dw4_asbs/seed${SEED} 
+  exp_name=dw4_asbs_stein_seed${SEED} \
+  hydra.run.dir=results/dw4_asbs_stein/seed${SEED}

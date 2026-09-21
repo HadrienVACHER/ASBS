@@ -1,0 +1,2 @@
+_target_: adjoint_samplers.components.term_cost.GraphSteinCVCorrectorGradTermCost
+max_grad_E_norm: ${max_grad_E_norm}
