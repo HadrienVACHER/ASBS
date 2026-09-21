@@ -1,6 +1,6 @@
 #!/bin/bash
 #PBS -N dw4_asbs
-#PBS -P YOUR_PROJECT_CODE
+#PBS -P gs_ccds_haidang.dau
 #PBS -q gpu_as
 #PBS -l walltime=4:00:00
 #PBS -l select=1:ncpus=4:ngpus=1
