@@ -6,13 +6,13 @@ defaults:
   - /sde@ref_sde: graph_ve
   - /model@controller: egnn
   - /state_cost: zero
-  - /term_cost: graph_corrector_term_cost_stein
-  - /matcher@adjoint_matcher: adjoint_ve
+  - /term_cost: graph_corrector_term_cost
+  - /matcher@adjoint_matcher: adjoint_ve_stein
   - /model@corrector: egnn
   - /matcher@corrector_matcher: corrector
   - /stein_cv: diag
 
-exp_name: dw4_asbs
+exp_name: dw4_asbs_stein
 
 # === source ===
 scale: 2

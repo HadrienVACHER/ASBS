@@ -12,6 +12,7 @@ import torch
 import torch.backends.cudnn as cudnn
 
 from adjoint_samplers.components.sde import ControlledSDE, sdeint
+from adjoint_samplers.components.stein_cv import LambdaT
 from adjoint_samplers.train_loop import train_one_epoch, train_one_epoch_stein
 import adjoint_samplers.utils.train_utils as train_utils
 import adjoint_samplers.utils.distributed_mode as distributed_mode
@@ -64,25 +65,30 @@ def main(cfg):
             corrector = corrector_matcher = None
 
         f_phi = None
+        lam_t = None
         if "stein_cv" in cfg:
             print("Instantiating Stein CV...")
             f_phi = hydra.utils.instantiate(cfg.stein_cv).to(device)
+            lam_t = LambdaT().to(device)
 
+        print("Instantiating grad of costs...")
         grad_term_cost = hydra.utils.instantiate(
             cfg.term_cost,
             corrector=corrector,
             energy=energy,
             ref_sde=ref_sde,
             source=source,
-            **({"stein_cv": f_phi} if f_phi is not None else {}),
         )
 
-
         print("Instantiating adjoint matcher...")
+        matcher_kwargs = {}
+        if f_phi is not None:
+            matcher_kwargs = dict(f_phi=f_phi, lam_t=lam_t, energy=energy)
         adjoint_matcher = hydra.utils.instantiate(
             cfg.adjoint_matcher,
             grad_term_cost=grad_term_cost,
             sde=sde,
+            **matcher_kwargs,
         )
 
 
@@ -98,10 +104,12 @@ def main(cfg):
                 controller.parameters(), **cfg.adjoint_matcher.optim,
             )
 
-        stein_opt = (
-            torch.optim.Adam(f_phi.parameters(), lr=1e-4)
-            if f_phi is not None else None
-        )
+        stein_opt = None
+        if f_phi is not None:
+            stein_opt = torch.optim.Adam(
+                list(f_phi.parameters()) + list(lam_t.parameters()),
+                lr=1e-4,
+            )
 
         checkpoint_path = Path(cfg.checkpoint or "checkpoints/checkpoint_latest.pt")
         checkpoint_path.parent.mkdir(exist_ok=True)
@@ -115,6 +123,9 @@ def main(cfg):
                 adjoint_matcher,
                 corrector=corrector,
                 corrector_matcher=corrector_matcher,
+                f_phi=f_phi,
+                lam_t=lam_t,
+                stein_opt=stein_opt,
             )
             # Note: Not wrapping this in a DDP since we don't differentiate through SDE simulation.
         else:
@@ -154,12 +165,15 @@ def main(cfg):
                 "corrector": (corrector_matcher, corrector),
             }.get(stage)
 
-            if f_phi is not None:
-                loss = train_one_epoch_stein(
+            log_extra = {}
+            if f_phi is not None and stage == "adjoint":
+                metrics = train_one_epoch_stein(
                     matcher, model, source, optimizer, lr_schedule,
                     epoch, device, cfg,
-                    f_phi=f_phi, stein_opt=stein_opt, energy=energy,
+                    stein_opt=stein_opt,
                 )
+                loss = metrics["loss"]
+                log_extra = {k: v for k, v in metrics.items() if k != "loss"}
             else:
                 loss = train_one_epoch(
                     matcher, model, source, optimizer, lr_schedule,
@@ -169,12 +183,20 @@ def main(cfg):
             writer.log({
                 f"{stage}_loss": loss,
                 f"{stage}_buffer_size": len(matcher.buffer),
+                **log_extra,
             }, step=epoch)
 
-            print("[{0} | {1}] {2}".format(
+            extra_txt = ""
+            if "stein_var_ratio" in log_extra:
+                extra_txt = " var_ratio={:.3f} lam={:.3f}".format(
+                    log_extra["stein_var_ratio"],
+                    log_extra["stein_lam_abs"],
+                )
+            print("[{0} | {1}] {2}{3}".format(
                 cyan(  f"{stage:<7}"),
                 yellow(f"ep={epoch:04}"),
                 green( f"loss={loss:.4f}"),
+                extra_txt,
             ))
 
             # Eval epoch according to the frequency
@@ -227,6 +249,9 @@ def main(cfg):
                     adjoint_matcher,
                     corrector=corrector,
                     corrector_matcher=corrector_matcher,
+                    f_phi=f_phi,
+                    lam_t=lam_t,
+                    stein_opt=stein_opt,
                 )
 
     except Exception as e:

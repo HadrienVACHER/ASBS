@@ -128,6 +128,9 @@ def save(
     corrector: torch.nn.Module | None = None,
     corrector_matcher: Matcher | None = None,
     ckpt_dir: Path = Path("checkpoints"),
+    f_phi: torch.nn.Module | None = None,
+    lam_t: torch.nn.Module | None = None,
+    stein_opt: Optimizer | None = None,
 ):
     ckpt_dir.mkdir(exist_ok=True)
 
@@ -145,6 +148,12 @@ def save(
     state["controller"] = get_state_dict(controller)
     if corrector is not None:
         state["corrector"] = get_state_dict(corrector)
+    if f_phi is not None:
+        state["f_phi"] = f_phi.state_dict()
+    if lam_t is not None:
+        state["lam_t"] = lam_t.state_dict()
+    if stein_opt is not None:
+        state["stein_opt"] = stein_opt.state_dict()
 
     # Save current checkpoint
     torch.save(state, ckpt_dir / "checkpoint_{}.pt".format(epoch))
@@ -163,6 +172,9 @@ def load(
     adjoint_matcher: Matcher,
     corrector: torch.nn.Module | None = None,
     corrector_matcher: Matcher | None = None,
+    f_phi: torch.nn.Module | None = None,
+    lam_t: torch.nn.Module | None = None,
+    stein_opt: Optimizer | None = None,
 ):
     optimizer.load_state_dict(checkpoint["optimizer"])
     controller.load_state_dict(checkpoint["controller"])
@@ -175,6 +187,13 @@ def load(
 
     if corrector_matcher is not None and "corrector_buffer" in checkpoint:
         corrector_matcher.buffer.load_state_dict(checkpoint["corrector_buffer"])
+
+    if f_phi is not None and "f_phi" in checkpoint:
+        f_phi.load_state_dict(checkpoint["f_phi"])
+    if lam_t is not None and "lam_t" in checkpoint:
+        lam_t.load_state_dict(checkpoint["lam_t"])
+    if stein_opt is not None and "stein_opt" in checkpoint:
+        stein_opt.load_state_dict(checkpoint["stein_opt"])
 
     return checkpoint["epoch"] + 1
 

@@ -1,2 +1,3 @@
+# Superseded by the bridge CV in SteinAdjointVEMatcher. Not used by dw4_asbs_stein.
 _target_: adjoint_samplers.components.term_cost.GraphSteinCVCorrectorGradTermCost
 max_grad_E_norm: ${max_grad_E_norm}

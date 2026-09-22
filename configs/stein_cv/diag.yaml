@@ -1,5 +1,4 @@
-# configs/stein_cv/diag.yaml
-_target_: adjoint_samplers.components.stein_cv.DiagonalSteinNet
+_target_: adjoint_samplers.components.stein_cv.ContextSteinNet
 dim: ${dim}
 hidden: 64
 n_layers: 3
