@@ -12,7 +12,6 @@ import torch
 import torch.backends.cudnn as cudnn
 
 from adjoint_samplers.components.sde import ControlledSDE, sdeint
-from adjoint_samplers.components.stein_cv import LambdaT
 from adjoint_samplers.train_loop import train_one_epoch, train_one_epoch_stein
 import adjoint_samplers.utils.train_utils as train_utils
 import adjoint_samplers.utils.distributed_mode as distributed_mode
@@ -64,12 +63,10 @@ def main(cfg):
         else:
             corrector = corrector_matcher = None
 
-        f_phi = None
-        lam_t = None
+        stein = None
         if "stein_cv" in cfg:
             print("Instantiating Stein CV...")
-            f_phi = hydra.utils.instantiate(cfg.stein_cv).to(device)
-            lam_t = LambdaT().to(device)
+            stein = hydra.utils.instantiate(cfg.stein_cv).to(device)
 
         print("Instantiating grad of costs...")
         grad_term_cost = hydra.utils.instantiate(
@@ -82,8 +79,8 @@ def main(cfg):
 
         print("Instantiating adjoint matcher...")
         matcher_kwargs = {}
-        if f_phi is not None:
-            matcher_kwargs = dict(f_phi=f_phi, lam_t=lam_t, energy=energy)
+        if stein is not None:
+            matcher_kwargs = dict(stein=stein, energy=energy)
         adjoint_matcher = hydra.utils.instantiate(
             cfg.adjoint_matcher,
             grad_term_cost=grad_term_cost,
@@ -105,11 +102,8 @@ def main(cfg):
             )
 
         stein_opt = None
-        if f_phi is not None:
-            stein_opt = torch.optim.Adam(
-                list(f_phi.parameters()) + list(lam_t.parameters()),
-                lr=1e-4,
-            )
+        if stein is not None:
+            stein_opt = torch.optim.Adam(stein.parameters(), lr=1e-3)
 
         checkpoint_path = Path(cfg.checkpoint or "checkpoints/checkpoint_latest.pt")
         checkpoint_path.parent.mkdir(exist_ok=True)
@@ -123,8 +117,7 @@ def main(cfg):
                 adjoint_matcher,
                 corrector=corrector,
                 corrector_matcher=corrector_matcher,
-                f_phi=f_phi,
-                lam_t=lam_t,
+                stein=stein,
                 stein_opt=stein_opt,
             )
             # Note: Not wrapping this in a DDP since we don't differentiate through SDE simulation.
@@ -166,7 +159,7 @@ def main(cfg):
             }.get(stage)
 
             log_extra = {}
-            if f_phi is not None and stage == "adjoint":
+            if stein is not None and stage == "adjoint":
                 metrics = train_one_epoch_stein(
                     matcher, model, source, optimizer, lr_schedule,
                     epoch, device, cfg,
@@ -188,9 +181,11 @@ def main(cfg):
 
             extra_txt = ""
             if "stein_var_ratio" in log_extra:
-                extra_txt = " var_ratio={:.3f} lam={:.3f}".format(
+                extra_txt = " var_ratio={:.3f} lam={:.3f} bias_z={:.2f} score={:.3f}".format(
                     log_extra["stein_var_ratio"],
                     log_extra["stein_lam_abs"],
+                    log_extra["stein_bias_z"],
+                    log_extra["stein_score_loss"],
                 )
             print("[{0} | {1}] {2}{3}".format(
                 cyan(  f"{stage:<7}"),
@@ -249,8 +244,7 @@ def main(cfg):
                     adjoint_matcher,
                     corrector=corrector,
                     corrector_matcher=corrector_matcher,
-                    f_phi=f_phi,
-                    lam_t=lam_t,
+                    stein=stein,
                     stein_opt=stein_opt,
                 )
 

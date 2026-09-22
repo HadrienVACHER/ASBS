@@ -14,6 +14,11 @@ defaults:
 
 exp_name: dw4_asbs_stein
 
+# === stein control variate ===
+# Vanilla ASBS target while the endpoint score network trains, then the CV.
+stein_warmup_epochs: 100
+stein_score_steps: 2
+
 # === source ===
 scale: 2
 

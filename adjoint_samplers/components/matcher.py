@@ -7,9 +7,7 @@ from torch.utils.data import DataLoader
 from adjoint_samplers.components.buffer import BatchBuffer
 from adjoint_samplers.components.sde import BaseSDE, sdeint
 from adjoint_samplers.components.state_cost import GradStateCost, ZeroGradStateCost
-from adjoint_samplers.components.stein_cv import stein_vector_bridge, ve_bridge_score_x1
 from adjoint_samplers.components.term_cost import GradEnergy
-import adjoint_samplers.utils.graph_utils as graph_utils
 
 
 class Matcher:
@@ -284,20 +282,17 @@ class CorrectorMatcher(Matcher):
 
 
 class SteinAdjointVEMatcher(AdjointVEMatcher):
-    """ VE adjoint matcher whose AM target uses a bridge Stein control variate.
+    """ VE adjoint matcher. The buffer stores the raw terminal adjoint.
 
-    The replay buffer still stores the raw terminal adjoint from line 6 of ASBS.
-    The control variate is applied in prepare_target, where t and x_t exist.
+    The control variate is built in stein_batch, where t and x_t exist.
     """
 
-    def __init__(self, f_phi, lam_t, energy, tau_max=0.99, **kwargs):
+    def __init__(self, stein, energy, **kwargs):
         super().__init__(**kwargs)
-        self.f_phi = f_phi
-        self.lam_t = lam_t
+        self.stein = stein
         self.energy = energy
-        self.tau_max = tau_max
 
-    def prepare_target(self, data, device, create_graph=False):
+    def stein_batch(self, data, device, with_field=True):
         x0 = data["x0"].to(device)
         x1 = data["x1"].to(device)
         adjoint1 = data["adjoint1"].to(device)
@@ -305,33 +300,19 @@ class SteinAdjointVEMatcher(AdjointVEMatcher):
         t = self.sample_t(x0).to(device)
         with torch.no_grad():
             xt = self.sde.sample_base_posterior(t, x0, x1)
-
-        s_br, tau = ve_bridge_score_x1(
-            self.sde.ref_sde, t, x0, xt, x1, tau_max=self.tau_max,
-        )
-        n_particles = self.energy.n_particles
-        spatial_dim = self.energy.n_spatial_dim
-        s_br = graph_utils.remove_mean(s_br, n_particles, spatial_dim)
-
-        tf, _, _ = stein_vector_bridge(
-            self.f_phi,
-            self.energy,
-            t,
-            x0,
-            xt,
-            x1,
-            s_br,
-            create_graph=create_graph,
-        )
-        tf = graph_utils.remove_mean(tf, n_particles, spatial_dim)
-
-        # ||TF|| blows up as τ → 1; rescale, and drop the CV on the Dirac bridge.
-        scale = (1 - tau.clamp(max=self.tau_max)).clamp(min=1e-4).sqrt()
-        tf = tf * scale
-        tf = torch.where(tau < self.tau_max, tf, torch.zeros_like(tf))
-
-        lam = self.lam_t(t)
-        corrected = adjoint1 - lam.detach() * tf.detach()
-        target = -corrected
         self._check_target_shape(t, xt, adjoint1)
-        return (t, xt), target, adjoint1.detach(), tf, lam, tau.detach()
+
+        pack = {
+            "t": t,
+            "xt": xt,
+            "x0": x0,
+            "x1": x1,
+            "adjoint": adjoint1.detach(),
+        }
+        if with_field:
+            tf_y, tau = self.stein.stein_field(
+                self.sde.ref_sde, t, x0, xt, x1, self.energy,
+            )
+            pack["tf_y"] = tf_y
+            pack["tau"] = tau
+        return pack

@@ -68,6 +68,13 @@ def train_one_epoch(
     return float(epoch_loss.compute().detach().cpu())
 
 
+def _stein_step(stein_opt, params, loss):
+    stein_opt.zero_grad(set_to_none=True)
+    loss.backward()
+    torch.nn.utils.clip_grad_norm_(params, max_norm=1.0)
+    stein_opt.step()
+
+
 def train_one_epoch_stein(
     matcher,
     model,
@@ -79,14 +86,23 @@ def train_one_epoch_stein(
     cfg,
     stein_opt,
 ):
-    """ Adjoint-matching epoch whose regression target includes a Stein CV.
+    """ Adjoint-matching epoch with a subspace Stein control variate.
 
-    φ and λ(t) are updated on the same residual, with u_θ held fixed.
-    The buffer itself is filled exactly as in vanilla ASBS.
+    The buffer is filled exactly as in vanilla ASBS. Each gradient step fits
+    the endpoint score by Hyvärinen matching on buffer pairs, then updates
+    u_θ on the control-variate target, then fits the test field and λ on the
+    same residual with u_θ held fixed. The score network never receives a
+    gradient from the adjoint residual.
+
+    For the first `stein_warmup_epochs` the target is the vanilla ASBS one and
+    only the score network trains.
     """
     B = cfg.resample_batch_size
     M = matcher.resample_size // (B * cfg.world_size)
     loss_scale = matcher.loss_scale
+    stein = matcher.stein
+    score_steps = int(cfg.get("stein_score_steps", 2))
+    warmup = epoch < int(cfg.get("stein_warmup_epochs", 0))
 
     is_asbs_init_stage = train_utils.is_asbs_init_stage(epoch, cfg)
 
@@ -99,49 +115,70 @@ def train_one_epoch_stein(
     epoch_loss = MeanMetric().to(device, non_blocking=True)
     epoch_var_ratio = MeanMetric().to(device, non_blocking=True)
     epoch_lam = MeanMetric().to(device, non_blocking=True)
-    epoch_tf = MeanMetric().to(device, non_blocking=True)
+    bias = stein.bias_accumulator()
+    epoch_score = MeanMetric().to(device, non_blocking=True)
     epoch_tau = MeanMetric().to(device, non_blocking=True)
 
     loader = iter(cycle(dataloader))
+    score_params = list(stein.score_net.parameters())
+    cv_params = stein.cv_parameters()
 
     model.train(True)
     for _ in range(cfg.train_itr_per_epoch):
-        optimizer.zero_grad()
         data = next(loader)
+        pack = matcher.stein_batch(data, device, with_field=not warmup)
+        t, xt = pack["t"], pack["xt"]
+        adjoint = pack["adjoint"]
 
-        (t, xt), target, adjoint1, tf, lam, tau = matcher.prepare_target(
-            data, device, create_graph=True,
-        )
+        score_loss = None
+        for _ in range(score_steps):
+            score_loss = stein.hyvarinen(pack["x0"], pack["x1"])
+            _stein_step(stein_opt, score_params, score_loss)
+
+        if warmup:
+            control = torch.zeros_like(adjoint)
+        else:
+            tf_y = pack["tf_y"]
+            lam = stein.coefficient(t, pack["x0"], xt)
+            control, raw = stein.assemble(tf_y, lam, t)
+
+        optimizer.zero_grad(set_to_none=True)
         output = model(t, xt)
-
+        target = -(adjoint - control.detach())
         loss = loss_scale * ((output - target) ** 2).mean()
         loss.backward()
         if cfg.clip_grad_norm:
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1e20)
         optimizer.step()
 
-        with torch.no_grad():
-            corrected = adjoint1 - lam * tf
-            var_ratio = corrected.pow(2).mean() / (adjoint1.pow(2).mean() + 1e-8)
-            epoch_var_ratio.update(var_ratio)
-            epoch_lam.update(lam.abs().mean())
-            epoch_tf.update(tf.mean(dim=0).norm())
-            epoch_tau.update(tau.mean())
+        if not warmup:
+            cv_loss = loss_scale * ((output.detach() + adjoint - control) ** 2).mean()
+            _stein_step(stein_opt, cv_params, cv_loss)
 
-        # Same residual as the AM loss, but gradients flow only into φ and λ(t).
-        cv_loss = ((output.detach() + adjoint1 - lam * tf) ** 2).mean()
-        stein_opt.zero_grad()
-        cv_loss.backward()
-        stein_opt.step()
+            with torch.no_grad():
+                corrected = adjoint - control.detach()
+                var_ratio = corrected.pow(2).mean() / (adjoint.pow(2).mean() + 1e-8)
+                epoch_var_ratio.update(var_ratio)
+                epoch_lam.update(lam.detach().abs().mean())
+                bias.update(raw.detach(), t, xt)
+                epoch_tau.update(pack["tau"].mean())
 
+        epoch_score.update(score_loss.detach())
         epoch_loss.update(loss.item())
         if lr_schedule:
             lr_schedule.step()
 
+    def value(metric, default):
+        if warmup and metric is not epoch_loss and metric is not epoch_score:
+            return default
+        return float(metric.compute().detach().cpu())
+
     return {
-        "loss": float(epoch_loss.compute().detach().cpu()),
-        "stein_var_ratio": float(epoch_var_ratio.compute().detach().cpu()),
-        "stein_lam_abs": float(epoch_lam.compute().detach().cpu()),
-        "stein_tf_mean_norm": float(epoch_tf.compute().detach().cpu()),
-        "stein_tau_mean": float(epoch_tau.compute().detach().cpu()),
+        "loss": value(epoch_loss, 0.0),
+        "stein_var_ratio": value(epoch_var_ratio, 1.0),
+        "stein_lam_abs": value(epoch_lam, 0.0),
+        "stein_bias_z": bias.zscore(),
+        "stein_score_loss": value(epoch_score, 0.0),
+        "stein_tau_mean": value(epoch_tau, 0.0),
+        "stein_active": 0.0 if warmup else 1.0,
     }

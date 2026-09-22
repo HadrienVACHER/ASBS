@@ -1,4 +1,7 @@
-_target_: adjoint_samplers.components.stein_cv.ContextSteinNet
-dim: ${dim}
+_target_: adjoint_samplers.components.stein_cv.SteinControlVariate
+n_particles: ${n_particles}
+spatial_dim: ${spatial_dim}
 hidden: 64
+score_hidden: 128
 n_layers: 3
+tau_max: 0.999
