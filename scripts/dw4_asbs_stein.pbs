@@ -2,7 +2,7 @@
 #PBS -N dw4_asbs
 #PBS -P gs_ccds_haidang.dau
 #PBS -q gpu_as
-#PBS -l walltime=6:00:00
+#PBS -l walltime=12:00:00
 #PBS -l select=1:ncpus=4:ngpus=1
 #PBS -j oe
 

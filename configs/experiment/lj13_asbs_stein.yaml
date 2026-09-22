@@ -1,0 +1,60 @@
+# @package _global_
+
+defaults:
+  - /problem: lj13
+  - /source: harmonic # meanfree
+  - /sde@ref_sde: graph_ve
+  - /model@controller: egnn
+  - /state_cost: zero
+  - /term_cost: graph_corrector_term_cost
+  - /matcher@adjoint_matcher: adjoint_ve_stein
+  - /model@corrector: egnn
+  - /matcher@corrector_matcher: corrector
+  - /stein_cv: diag
+
+exp_name: lj13_asbs_stein
+
+# === stein control variate ===
+# Vanilla ASBS target while the endpoint score network trains, then the CV.
+stein_warmup_epochs: 100
+stein_score_steps: 2
+
+# === source ===
+scale: 2
+
+
+# === sde ===
+nfe: 1000
+sigma_max: 1
+sigma_min: 0.001 ## Use smaller sigma_max
+rescale_t: null # quad, cosine
+
+
+# === training ===
+num_epochs: 5000
+max_grad_E_norm: 100
+adj_num_epochs_per_stage: 300
+ctr_num_epochs_per_stage: 20
+
+adjoint_matcher:
+  buffer_size: 10000
+  duplicates: 25
+  resample_size: 1000
+  num_epochs_per_stage: ${adj_num_epochs_per_stage}
+  optim:
+    lr: 1e-4
+    weight_decay: 0
+
+corrector_matcher:
+  buffer_size: 10000
+  duplicates: 25
+  resample_size: 1000
+  num_epochs_per_stage: ${ctr_num_epochs_per_stage}
+  optim:
+    lr: 1e-4
+    weight_decay: 0
+
+
+# === eval & logging ===
+use_wandb: true
+eval_freq: 50

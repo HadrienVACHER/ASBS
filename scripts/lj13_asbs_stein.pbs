@@ -1,8 +1,8 @@
 #!/bin/bash
-#PBS -N dw4_asbs
+#PBS -N lj13_asbs_stein
 #PBS -P gs_ccds_haidang.dau
 #PBS -q gpu_as
-#PBS -l walltime=12:00:00
+#PBS -l walltime=120:00:00
 #PBS -l select=1:ncpus=4:ngpus=1
 #PBS -j oe
 
@@ -12,10 +12,10 @@ module load anaconda/2025
 eval "$(/usr/local/anaconda2025/bin/conda shell.bash hook)"
 conda activate BMS
 
-: "${SEED:?SEED must be set, e.g. qsub -v SEED=0 dw4_asbs.pbs}"
+: "${SEED:?SEED must be set, e.g. qsub -v SEED=0 scripts/lj13_asbs_stein.pbs}"
 
 python train.py \
-  experiment=dw4_asbs \
+  experiment=lj13_asbs_stein \
   seed=${SEED} \
-  exp_name=dw4_asbs_seed${SEED} \
-  hydra.run.dir=results/dw4_asbs/seed${SEED} 
+  exp_name=lj13_asbs_stein_seed${SEED} \
+  hydra.run.dir=results/lj13_asbs_stein/seed${SEED}
