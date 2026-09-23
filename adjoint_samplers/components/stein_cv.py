@@ -61,28 +61,6 @@ def partial_divergence(values, y, create_graph):
     return torch.stack(parts, dim=-1)
 
 
-def time_bins(t, n_bins):
-    return (t.detach().squeeze(-1) * n_bins).long().clamp(0, n_bins - 1)
-
-
-def bin_center(values, t, n_bins):
-    """ Subtract the detached per-bin batch mean, binned in t.
-
-    The subtracted constant depends on the bin only. Its expectation over
-    batches is E[values | bin], so the controller update stays unbiased in
-    expectation, and the test field gains nothing from a constant offset.
-    It removes marginal bias only and adds O(1/sqrt(B)) noise.
-    """
-    idx = time_bins(t, n_bins)
-    centered = torch.zeros_like(values)
-    for b in range(n_bins):
-        mask = (idx == b).unsqueeze(-1)
-        count = mask.sum().clamp(min=1.0)
-        mean = (values.detach() * mask).sum(dim=0) / count
-        centered = centered + mask * (values - mean)
-    return centered
-
-
 def bridge_score_y1(tau, total_var, y0, yt, y1, tau_max):
     """ ∇_{y1} log p_base(yt | y0, y1) on the mean-free coordinates.
 
@@ -106,8 +84,11 @@ class SteinControlVariate(nn.Module):
     Hyvärinen score matching on buffer pairs (x0, x1). The accuracy of that
     fit is the only source of bias in the control variate.
 
-    λ(t, x0, xt) is a function of the conditioning variables, so it cannot
-    change the conditional mean. λ and the score network start at zero.
+    The endpoint conditional score is the gradient of a scalar potential, which
+    is the function class a score belongs to. λ(t, x0, xt) is bounded and the
+    Stein residual is divided by a lagged root-mean-square, so the correction
+    stays the same size as the adjoint instead of amplifying a score error.
+    Both start at zero, and the first controller updates match vanilla ASBS.
     """
 
     def __init__(
@@ -118,22 +99,27 @@ class SteinControlVariate(nn.Module):
         score_hidden=128,
         n_layers=3,
         tau_max=0.999,
-        n_bins=4,
+        lam_max=1.0,
     ):
         super().__init__()
         self.n_particles = n_particles
         self.spatial_dim = spatial_dim
         self.tau_max = tau_max
-        self.n_bins = n_bins
+        self.lam_max = lam_max
         rank = (n_particles - 1) * spatial_dim
         self.rank = rank
         self.register_buffer("Q", mean_free_basis(n_particles, spatial_dim))
+        # 0 marks "no past scale yet". Division uses the previous value.
+        self.register_buffer("tf_rms", torch.tensor(0.0))
 
         # λ starts at 0 so the first update equals vanilla ASBS. The field must
         # not start at 0: with TF = 0 and λ = 0 neither gets a gradient.
         self.field = ConcatMLP(3 * rank + 2, rank, hidden, n_layers)
-        self.score_net = ConcatMLP(2 * rank, rank, score_hidden, n_layers, zero_last=True)
+        self.potential = ConcatMLP(2 * rank, 1, score_hidden, n_layers, zero_last=True)
         self.lam_net = ConcatMLP(1 + 2 * rank, 1, hidden, n_layers, zero_last=True)
+
+    def score_parameters(self):
+        return list(self.potential.parameters())
 
     def cv_parameters(self):
         return list(self.field.parameters()) + list(self.lam_net.parameters())
@@ -168,43 +154,84 @@ class SteinControlVariate(nn.Module):
         s_br, active = bridge_score_y1(
             tau, total_var, y0, yt, y1.detach(), self.tau_max,
         )
-        with torch.no_grad():
-            endpoint_score = self.score_net(y1.detach(), y0)
-        score = s_br + endpoint_score
+        score = s_br + self.endpoint_score(y1, y0)
 
         x1_var = self.to_ambient(y1)
         energy_value = energy.eval(x1_var)
         if energy_value.ndim == 1:
             energy_value = energy_value.unsqueeze(-1)
-        field = self.field(y1, energy_value, t, y0, yt)
+        # asinh keeps a quartic energy, and a far-away configuration, from
+        # saturating the linear layers. It is a fixed function of this sample,
+        # so the divergence in y1 is still a Stein divergence.
+        field = self.field(
+            torch.asinh(y1),
+            torch.asinh(energy_value),
+            t,
+            torch.asinh(y0),
+            torch.asinh(yt),
+        )
         tf = partial_divergence(field, y1, create_graph=True) + field * score
 
         # (1-τ) is a function of t, so it preserves a conditional mean of zero.
         # It cancels the 1/(1-τ) pole of s_br.
         scale = (1.0 - tau).detach()
         tf = torch.where(active, tf * scale, torch.zeros_like(tf))
-        return tf, tau.detach()
+        return self._scale_tf(tf), tau.detach()
+
+    def endpoint_score(self, y1, y0):
+        """ ∇_{y1} ψ(y1, y0), detached from the potential parameters. """
+        with torch.enable_grad():
+            leaf = y1.detach().requires_grad_(True)
+            psi = self.potential(leaf, y0.detach())
+            score = torch.autograd.grad(psi.sum(), leaf, create_graph=False)[0]
+        return score.detach()
+
+    def _scale_tf(self, tf):
+        """ Divide by the previous root-mean-square.
+
+        The divisor is a lagged scalar, so a conditional mean of zero stays
+        zero. After this, λ of order 1 is a correction of the same size as the
+        residual rather than a gain of ten or twenty on a tiny field.
+        """
+        batch = tf.detach().pow(2).mean().sqrt()
+        have_scale = float(self.tf_rms) > 0.0
+        scale = float(self.tf_rms.clamp(min=1e-3)) if have_scale else 1.0
+        scaled = tf / scale
+        if torch.isfinite(batch).all():
+            obs = float(batch.clamp(min=1e-3))
+            if have_scale:
+                obs = min(obs, scale * 10.0)
+            with torch.no_grad():
+                if have_scale:
+                    self.tf_rms.mul_(0.99).add_(obs * 0.01)
+                else:
+                    self.tf_rms.fill_(obs)
+        return scaled
 
     def hyvarinen(self, x0, x1):
         """ Conditional implicit score matching for ∇_{y1} log p(y1 | y0). """
         y0 = self.to_coord(x0).detach()
         y1 = self.to_coord(x1).detach().requires_grad_(True)
-        score = self.score_net(y1, y0)
+        psi = self.potential(y1, y0)
+        score = torch.autograd.grad(psi.sum(), y1, create_graph=True)[0]
         div = partial_divergence(score, y1, create_graph=True).sum(dim=-1)
         return (div + 0.5 * score.pow(2).sum(dim=-1)).mean()
 
     def coefficient(self, t, x0, xt):
-        y0 = self.to_coord(x0).detach()
-        yt = self.to_coord(xt).detach()
-        return self.lam_net(t.detach(), y0, yt)
+        y0 = torch.asinh(self.to_coord(x0).detach())
+        yt = torch.asinh(self.to_coord(xt).detach())
+        raw = self.lam_net(t.detach(), y0, yt)
+        return self.lam_max * torch.tanh(raw)
 
     def assemble(self, tf_y, lam, t):
-        """ Ambient control variate λ TF, bin-centered in t.
+        """ Ambient control variate λ TF.
 
-        Returns the centered control variate and the uncentered one.
+        Returns the control variate twice. The second copy is the one the
+        bias regression sees; nothing is subtracted from it.
         """
+        del t
         raw = lam * self.to_ambient(tf_y)
-        return bin_center(raw, t, self.n_bins), raw
+        return raw, raw
 
     def bias_accumulator(self):
         return BiasAccumulator(self)

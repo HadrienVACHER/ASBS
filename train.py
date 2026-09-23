@@ -103,7 +103,16 @@ def main(cfg):
 
         stein_opt = None
         if stein is not None:
-            stein_opt = torch.optim.Adam(stein.parameters(), lr=1e-3)
+            # SGD so a clipped gradient cannot become a huge Adam step.
+            # The potential learns faster than the field and λ, which only
+            # track the adjoint residual.
+            stein_opt = torch.optim.SGD(
+                [
+                    {"params": stein.score_parameters(), "lr": 1e-2},
+                    {"params": stein.cv_parameters(), "lr": 1e-5},
+                ],
+                lr=1e-4,
+            )
 
         checkpoint_path = Path(cfg.checkpoint or "checkpoints/checkpoint_latest.pt")
         checkpoint_path.parent.mkdir(exist_ok=True)

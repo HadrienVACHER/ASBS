@@ -15,9 +15,9 @@ defaults:
 exp_name: dw4_asbs_stein
 
 # === stein control variate ===
-# Vanilla ASBS target while the endpoint score network trains, then the CV.
+# Endpoint potential trains alone for this many epochs. The correction is on
+# for the rest of the first adjoint stage.
 stein_warmup_epochs: 100
-stein_score_steps: 2
 
 # === source ===
 scale: 2
